@@ -113,6 +113,7 @@ SELECT COUNT(*)
   secure_directory(dirname($chunkfile_path));
 
   move_uploaded_file($_FILES['file']['tmp_name'], $chunkfile_path);
+  file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] chunk '.$chunkfile_path." uploaded\n", FILE_APPEND);
 
   // are all chunks uploaded?
   $chunk_ids_uploaded = array();
@@ -165,20 +166,12 @@ SELECT `execution_id`
     AND `user_id` = '.$user['id'].'
     AND '.$rand_int.'='.$rand_int.'
 ;';
-    file_put_contents('/tmp/uploadAsync.log', 'query  = '.$query."\n", FILE_APPEND);
+    file_put_contents('/tmp/uploadAsync.log', '['.date('c').'][exec='.$execution_id.'] query  = '.$query."\n", FILE_APPEND);
 
     $tokens = query2array($query, null, 'execution_id');
 
     if ($tokens[0] == $execution_id)
     {
-      $query = '
-DELETE
-  FROM `'.$token_tablename.'`
-  WHERE `file_md5` = \''.$params['original_sum'].'\'
-    AND `user_id` = '.$user['id'].'
-;';
-      pwg_query($query);
-
       $output_filepath = $output_filepath_prefix.'.merged';
 
       // start with a clean output merge file
@@ -188,8 +181,12 @@ DELETE
       {
         $chunkfile_path = sprintf($chunkfile_path_pattern, $chunk_id, $params['chunks']);
 
+        file_put_contents('/tmp/uploadAsync.log', '['.date('c').'][exec='.$execution_id.'] chunk  '.$chunkfile_path." merged\n", FILE_APPEND);
+
         if (!file_put_contents($output_filepath, file_get_contents($chunkfile_path), FILE_APPEND))
         {
+          file_put_contents('/tmp/uploadAsync.log', '['.date('c').'][exec='.$execution_id.'] error merging chunk '.$chunkfile_path."\n", FILE_APPEND);
+          uploadasync_delete_upload_token($params['original_sum']);
           return new PwgError(500, 'error while merging chunk '.$chunk_id);
         }
 
@@ -201,6 +198,7 @@ DELETE
       if ($merged_md5 != $params['original_sum'])
       {
         unlink($output_filepath);
+        uploadasync_delete_upload_token($params['original_sum']);
         return new PwgError(500, 'provided original_sum '.$params['original_sum'].' does not match with merged file sum '.$merged_md5);
       }
 
@@ -262,9 +260,25 @@ DELETE
         $user['level'] = $params['level'];
       }
 
+      uploadasync_delete_upload_token($params['original_sum']);
       return $service->invoke('pwg.images.getInfo', array('image_id' => $image_id));
     }
   }
 
   return array('message' => 'chunks uploaded = '.implode(',', $chunk_ids_uploaded));
+}
+
+function uploadasync_delete_upload_token($file_md5)
+{
+  global $user, $prefixeTable;
+
+  $token_tablename = $prefixeTable.'upload_tokens';
+
+  $query = '
+DELETE
+  FROM `'.$token_tablename.'`
+  WHERE `file_md5` = \''.$file_md5.'\'
+    AND `user_id` = '.$user['id'].'
+;';
+  pwg_query($query);
 }
