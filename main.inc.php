@@ -116,14 +116,7 @@ SELECT COUNT(*)
   file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] chunk '.$chunkfile_path." uploaded\n", FILE_APPEND);
 
   // are all chunks uploaded?
-  $chunk_ids_uploaded = array();
-  for ($i = 1; $i <= $params['chunks']; $i++)
-  {
-    if (file_exists(sprintf($chunkfile_path_pattern, $i, $params['chunks'])))
-    {
-      $chunk_ids_uploaded[] = $i;
-    }
-  }
+  $chunk_ids_uploaded = uploadasync_list_uploaded_chunks($params['chunks'], $chunkfile_path_pattern);
 
   // file_put_contents('/tmp/uploadAsync.log', 'chunks uploaded = '.implode(',', $chunk_ids_uploaded)."\n", FILE_APPEND);
   // file_put_contents('/tmp/uploadAsync.log', 'nb chunks  = '.$params['chunks']."\n", FILE_APPEND);
@@ -172,6 +165,14 @@ SELECT `execution_id`
 
     if ($tokens[0] == $execution_id)
     {
+      // let's check again the chunks are still there
+      $chunk_ids_uploaded = uploadasync_list_uploaded_chunks($params['chunks'], $chunkfile_path_pattern);
+      if ($params['chunks'] != count($chunk_ids_uploaded))
+      {
+        file_put_contents('/tmp/uploadAsync.log', '['.date('c').'][exec='.$execution_id.'] merge already done, conflict avoided'."\n", FILE_APPEND);
+        return array('message' => 'all chunks uploaded, conflict avoided');
+      }
+
       $output_filepath = $output_filepath_prefix.'.merged';
 
       // start with a clean output merge file
@@ -281,4 +282,19 @@ DELETE
     AND `user_id` = '.$user['id'].'
 ;';
   pwg_query($query);
+}
+
+function uploadasync_list_uploaded_chunks($nb_chunks, $chunkfile_path_pattern)
+{
+  $chunk_ids_uploaded = array();
+
+  for ($i = 1; $i <= $nb_chunks; $i++)
+  {
+    if (file_exists(sprintf($chunkfile_path_pattern, $i, $nb_chunks)))
+    {
+      $chunk_ids_uploaded[] = $i;
+    }
+  }
+
+  return $chunk_ids_uploaded;
 }
