@@ -2,7 +2,7 @@
 /*
 Plugin Name: uploadAsync
 Version: auto
-Description: add method pwg.images.uploadAsync (to be integrated into Piwigo core 2.11)
+Description: add method pwg.images.uploadAsync (to be integrated into Piwigo core 11)
 Plugin URI: http://piwigo.org/ext/extension_view.php?eid=
 Author: plg
 Author URI: https://piwigo.org
@@ -10,6 +10,8 @@ Author URI: https://piwigo.org
 
 defined('PHPWG_ROOT_PATH') or die('Hacking attempt!');
 
+if (version_compare(PHPWG_VERSION, 11, '<'))
+{
 global $prefixeTable;
 
 // +-----------------------------------------------------------------------+
