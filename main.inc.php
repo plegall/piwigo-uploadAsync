@@ -58,9 +58,7 @@ function uploadasync_add_methods($arr)
 
 function ws_images_uploadAsync($params, &$service)
 {
-  global $conf, $user;
-
-  // file_put_contents('/tmp/uploadAsync.log', 'user_id/user_status  = '.$user['id'].'/'.$user['status']."\n", FILE_APPEND);
+  global $conf, $user, $logger;
 
   // additional check for some parameters
   if (!preg_match('/^[a-fA-F0-9]{32}$/', $params['original_sum']))
@@ -76,8 +74,6 @@ function ws_images_uploadAsync($params, &$service)
   // build $user
   // include(PHPWG_ROOT_PATH.'include/user.inc.php');
   $user = build_user($user['id'], false);
-
-  // file_put_contents('/tmp/uploadAsync.log', 'user_id/user_status  = '.$user['id'].'/'.$user['status']."\n", FILE_APPEND);
 
   if (!is_admin())
   {
@@ -115,14 +111,14 @@ SELECT COUNT(*)
 
   // move uploaded file
   move_uploaded_file($_FILES['file']['tmp_name'], $chunkfile_path);
-  file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] uploaded '.$chunkfile_path."\n", FILE_APPEND);
+  $logger->debug(__FUNCTION__.' uploaded '.$chunkfile_path);
 
   // MD5 checksum
   $chunk_md5 = md5_file($chunkfile_path);
   if ($chunk_md5 != $params['chunk_sum'])
   {
     unlink($chunkfile_path);
-    file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] '.$chunkfile_path." MD5 checksum mismatched!\n", FILE_APPEND);
+    $logger->error(__FUNCTION__.' '.$chunkfile_path.' MD5 checksum mismatched');
     return new PwgError(500, "MD5 checksum chunk file mismatched");
   }
 
@@ -138,17 +134,15 @@ SELECT COUNT(*)
     }
   }
 
-  // file_put_contents('/tmp/uploadAsync.log', 'chunks uploaded = '.implode(',', $chunk_ids_uploaded)."\n", FILE_APPEND);
-  // file_put_contents('/tmp/uploadAsync.log', 'nb chunks  = '.$params['chunks']."\n", FILE_APPEND);
-
   if ($params['chunks'] != count($chunk_ids_uploaded))
   {
     // all chunks are not yet available
+    $logger->debug(__FUNCTION__.' all chunks are not uploaded yet, maybe on next chunk, exit for now');
     return array('message' => 'chunks uploaded = '.implode(',', $chunk_ids_uploaded));
   }
   
   // all chunks available
-  file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] '.$params['original_sum'].' '.$params['chunks']." chunks available\n", FILE_APPEND);
+  $logger->debug(__FUNCTION__.' '.$params['original_sum'].' '.$params['chunks'].' chunks available, try now to get lock for merging');
   $output_filepath = $output_filepath_prefix.'.merged';
   
   // chunks already being merged?
@@ -156,7 +150,7 @@ SELECT COUNT(*)
   {
     // merge file already exists
     fclose($fp);
-    file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] '.$output_filepath." already exists\n", FILE_APPEND);
+    $logger->error(__FUNCTION__.' '.$output_filepath.' already exists, another merge is under process');
     return array('message' => 'chunks uploaded = '.implode(',', $chunk_ids_uploaded));
   }
   
@@ -165,17 +159,21 @@ SELECT COUNT(*)
   if ( !$fp )
   {
     // unable to create file and open it for writing only
-    file_put_contents('/tmp/uploadAsync.log', '['.date('c').']'.$chunkfile_path." unable to create merged\n", FILE_APPEND);
+    $logger->error(__FUNCTION__.' '.$chunkfile_path.' unable to create merge file');
     return new PwgError(500, 'error while creating merged '.$chunkfile_path);
   }
+
   // acquire an exclusive lock and keep it until merge completes
   // this postpones another uploadAsync task running in another thread
-  if (!flock($fp, LOCK_EX)) {
+  if (!flock($fp, LOCK_EX))
+  {
     // unable to obtain lock
     fclose($fp);
-    file_put_contents('/tmp/uploadAsync.log', '['.date('c').']'.$chunkfile_path." unable to obtain lock\n", FILE_APPEND);
+    $logger->error(__FUNCTION__.' '.$chunkfile_path.' unable to obtain lock');
     return new PwgError(500, 'error while locking merged '.$chunkfile_path);
   }
+
+  $logger->debug(__FUNCTION__.' lock obtained to merge chunks');
 
   // loop over all chunks
   foreach ($chunk_ids_uploaded as $chunk_id)
@@ -186,7 +184,7 @@ SELECT COUNT(*)
     if (!file_exists($chunkfile_path))
     {
       // cancel merge
-      file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] '.$chunkfile_path." already merged\n", FILE_APPEND);
+      $logger->error(__FUNCTION__.' '.$chunkfile_path.' already merged');
       flock($fp, LOCK_UN);
       fclose($fp);
       return array('message' => 'chunks uploaded = '.implode(',', $chunk_ids_uploaded));
@@ -195,13 +193,16 @@ SELECT COUNT(*)
     if (!fwrite($fp, file_get_contents($chunkfile_path)))
     {
       // could not append chunk
-      file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] error merging chunk '.$chunkfile_path."\n", FILE_APPEND);
+      $logger->error(__FUNCTION__.' error merging chunk '.$chunkfile_path);
       flock($fp, LOCK_UN);
       fclose($fp);
+
       // delete merge file without returning an error
       @unlink($output_filepath);
       return new PwgError(500, 'error while merging chunk '.$chunk_id);
     }
+
+    $logger->debug(__FUNCTION__.' original_sum='.$params['original_sum'].', chunk '.$chunk_id.'/'.$params['chunks'].' merged');
 
     // delete chunk and clear cache
     unlink($chunkfile_path);
@@ -211,7 +212,8 @@ SELECT COUNT(*)
   fflush($fp);
   flock($fp, LOCK_UN);
   fclose($fp);
-  file_put_contents('/tmp/uploadAsync.log', '['.date('c')."] ".$output_filepath." saved\n", FILE_APPEND);
+
+  $logger->debug(__FUNCTION__.' merged file '.$output_filepath.' saved');
   
   // MD5 checksum
   $merged_md5 = md5_file($output_filepath);
@@ -219,10 +221,11 @@ SELECT COUNT(*)
   if ($merged_md5 != $params['original_sum'])
   {
     unlink($output_filepath);
-    file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] '.$output_filepath." MD5 checksum mismatched!\n", FILE_APPEND);
+    $logger->error(__FUNCTION__.' '.$output_filepath.' MD5 checksum mismatched!');
     return new PwgError(500, "MD5 checksum merged file mismatched");
   }
-  file_put_contents('/tmp/uploadAsync.log', '['.date('c')."] ".$output_filepath." MD5 checksum Ok\n", FILE_APPEND);
+
+  $logger->debug(__FUNCTION__.' '.$output_filepath.' MD5 checksum OK');
 
   include_once(PHPWG_ROOT_PATH.'admin/include/functions_upload.inc.php');
 
@@ -235,7 +238,7 @@ SELECT COUNT(*)
     $params['original_sum']
   );
 
-  // file_put_contents('/tmp/uploadAsync.log', 'image_id after add_uploaded_file = '.$image_id."\n", FILE_APPEND);
+  $logger->debug(__FUNCTION__.' image_id after add_uploaded_file = '.$image_id);
 
   // and now, let's create tag associations
   if (isset($params['tag_ids']) and !empty($params['tag_ids']))
@@ -284,37 +287,39 @@ SELECT COUNT(*)
 
   // delete chunks older than a week
   $now = time();
-  foreach (glob($conf['upload_dir'].'/buffer/'."*.chunk") as $file) {
-    if (is_file($file)) {
-      if ($now - filemtime($file) >= 60 * 60 * 24 * 7) { // 7 days
-        file_put_contents('/tmp/uploadAsync.log', 'delete '.$file."\n", FILE_APPEND);
+  foreach (glob($conf['upload_dir'].'/buffer/'."*.chunk") as $file)
+  {
+    if (is_file($file))
+    {
+      if ($now - filemtime($file) >= 60 * 60 * 24 * 7) // 7 days
+      {
+        $logger->info(__FUNCTION__.' delete '.$file);
         unlink($file);
-      } else {
-        file_put_contents('/tmp/uploadAsync.log', 'keep '.$file."\n", FILE_APPEND);
+      }
+      else
+      {
+        $logger->debug(__FUNCTION__.' keep '.$file);
       }
     }
   }
 
   // delete merged older than a week
-  foreach (glob($conf['upload_dir'].'/buffer/'."*.merged") as $file) {
-    if (is_file($file)) {
-      if ($now - filemtime($file) >= 60 * 60 * 24 * 7) { // 7 days
-        file_put_contents('/tmp/uploadAsync.log', 'delete '.$file."\n", FILE_APPEND);
+  foreach (glob($conf['upload_dir'].'/buffer/'."*.merged") as $file)
+  {
+    if (is_file($file))
+    {
+      if ($now - filemtime($file) >= 60 * 60 * 24 * 7) // 7 days
+      {
+        $logger->info(__FUNCTION__.' delete '.$file);
         unlink($file);
-      } else {
-        file_put_contents('/tmp/uploadAsync.log', 'keep '.$file."\n", FILE_APPEND);
+      }
+      else
+      {
+        $logger->debug(__FUNCTION__.' keep '.$file);
       }
     }
   }
 
   return $service->invoke('pwg.images.getInfo', array('image_id' => $image_id));
 }
-
-function file_exists_safe($file) {
-    // tries to create and open for writing only
-    if (!$fd = fopen($file, 'xb')) {
-        return true;  // the file already exists
-    }
-    fclose($fd);  // the file is now created, we don't need the file handler
-    return false;
 }
