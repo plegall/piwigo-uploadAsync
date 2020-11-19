@@ -41,6 +41,7 @@ our %conf = (
 my $result = undef;
 
 my $chunk_path = '/tmp/'.$opt{original_sum}.'-'.$opt{chunk}.'.chunk';
+chomp(my $chunk_sum = `md5 -q $chunk_path`);
 
 my $ua = LWP::UserAgent->new;
 $ua->agent('Mozilla/piwigo_uploadAsync.pl 1.56');
@@ -55,6 +56,7 @@ my $response = $ua->post(
         original_sum => $opt{original_sum},
         filename => $opt{filename},
         chunk => $opt{chunk},
+        chunk_sum => $chunk_sum,
         chunks => $opt{chunks},
         category => $opt{album_id},
         file => [$chunk_path],

@@ -3,7 +3,7 @@
 ####
 # Usage
 #
-# perl piwigo_uploadAsync.pl --url=http://piwigo.org/demo --user=admin --password=secret --file=photo.jpg --album_id=9
+# perl piwigo_uploadAsync_parallel.pl --url=http://piwigo.org/demo --user=admin --password=secret --file=photo.jpg --album_id=9
 
 use strict;
 use warnings;
@@ -32,7 +32,7 @@ GetOptions(
 );
 
 our %conf = (
-    chunk_size => 100_000,
+    chunk_size => 1_000_000,
 );
 
 my $result = undef;
