@@ -34,6 +34,7 @@ function uploadasync_add_methods($arr)
         'username' => array(),
         'password' => array('default'=>null),
         'chunk' => array('type'=>WS_TYPE_INT|WS_TYPE_POSITIVE),
+        'chunk_sum' => array(),
         'chunks' => array('type'=>WS_TYPE_INT|WS_TYPE_POSITIVE),
         'original_sum' => array(),
         'category' => array('default'=>null, 'flags'=>WS_PARAM_FORCE_ARRAY, 'type'=>WS_TYPE_ID),
@@ -112,189 +113,208 @@ SELECT COUNT(*)
   }
   secure_directory(dirname($chunkfile_path));
 
+  // move uploaded file
   move_uploaded_file($_FILES['file']['tmp_name'], $chunkfile_path);
-  file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] chunk '.$chunkfile_path." uploaded\n", FILE_APPEND);
+  file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] uploaded '.$chunkfile_path."\n", FILE_APPEND);
+
+  // MD5 checksum
+  $chunk_md5 = md5_file($chunkfile_path);
+  if ($chunk_md5 != $params['chunk_sum'])
+  {
+    unlink($chunkfile_path);
+    file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] '.$chunkfile_path." MD5 checksum mismatched!\n", FILE_APPEND);
+    return new PwgError(500, "MD5 checksum chunk file mismatched");
+  }
 
   // are all chunks uploaded?
-  $chunk_ids_uploaded = uploadasync_list_uploaded_chunks($params['chunks'], $chunkfile_path_pattern);
+  $chunk_ids_uploaded = array();
+  for ($i = 1; $i <= $params['chunks']; $i++)
+  {
+    $chunkfile = sprintf($chunkfile_path_pattern, $i, $params['chunks']);
+    if ( file_exists($chunkfile) && ($fp = fopen($chunkfile, "rb"))!==false )
+    {
+      $chunk_ids_uploaded[] = $i;
+      fclose($fp);
+    }
+  }
 
   // file_put_contents('/tmp/uploadAsync.log', 'chunks uploaded = '.implode(',', $chunk_ids_uploaded)."\n", FILE_APPEND);
   // file_put_contents('/tmp/uploadAsync.log', 'nb chunks  = '.$params['chunks']."\n", FILE_APPEND);
 
-  if ($params['chunks'] == count($chunk_ids_uploaded))
+  if ($params['chunks'] != count($chunk_ids_uploaded))
   {
-    global $prefixeTable;
-
-    $token_tablename = $prefixeTable.'upload_tokens';
-
-    $query = '
-CREATE TABLE IF NOT EXISTS `'.$token_tablename.'` (
-  `file_md5` CHAR(32) NOT NULL,
-  `user_id` mediumint(8) unsigned NOT NULL,
-  `execution_id` char(10) NOT NULL,
-  `created_on` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (file_md5, user_id)
-);';
-    pwg_query($query);
-
-    $execution_id = generate_key(10);
-
-    single_insert(
-      $token_tablename,
-      array(
-        'file_md5' => $params['original_sum'],
-        'user_id' => $user['id'],
-        'execution_id' => $execution_id,
-      ),
-      array('ignore'=>true)
-    );
-
-    // the 123456=123456 (random) in the SQL query makes sure it doesn't use the MySQL cache, that's a trick
-    $rand_int = rand(100000, 999999);
-
-    $query = '
-SELECT `execution_id`
-  FROM `'.$token_tablename.'`
-  WHERE `file_md5` = \''.$params['original_sum'].'\'
-    AND `user_id` = '.$user['id'].'
-    AND '.$rand_int.'='.$rand_int.'
-;';
-    file_put_contents('/tmp/uploadAsync.log', '['.date('c').'][exec='.$execution_id.'] query  = '.$query."\n", FILE_APPEND);
-
-    $tokens = query2array($query, null, 'execution_id');
-
-    if ($tokens[0] == $execution_id)
-    {
-      // let's check again the chunks are still there
-      $chunk_ids_uploaded = uploadasync_list_uploaded_chunks($params['chunks'], $chunkfile_path_pattern);
-      if ($params['chunks'] != count($chunk_ids_uploaded))
-      {
-        file_put_contents('/tmp/uploadAsync.log', '['.date('c').'][exec='.$execution_id.'] merge already done, conflict avoided'."\n", FILE_APPEND);
-        return array('message' => 'all chunks uploaded, conflict avoided');
-      }
-
-      $output_filepath = $output_filepath_prefix.'.merged';
-
-      // start with a clean output merge file
-      file_put_contents($output_filepath, '');
-
-      foreach ($chunk_ids_uploaded as $chunk_id)
-      {
-        $chunkfile_path = sprintf($chunkfile_path_pattern, $chunk_id, $params['chunks']);
-
-        file_put_contents('/tmp/uploadAsync.log', '['.date('c').'][exec='.$execution_id.'] chunk  '.$chunkfile_path." merged\n", FILE_APPEND);
-
-        if (!file_put_contents($output_filepath, file_get_contents($chunkfile_path), FILE_APPEND))
-        {
-          file_put_contents('/tmp/uploadAsync.log', '['.date('c').'][exec='.$execution_id.'] error merging chunk '.$chunkfile_path."\n", FILE_APPEND);
-          uploadasync_delete_upload_token($params['original_sum']);
-          return new PwgError(500, 'error while merging chunk '.$chunk_id);
-        }
-
-        unlink($chunkfile_path);
-      }
-
-      $merged_md5 = md5_file($output_filepath);
-
-      if ($merged_md5 != $params['original_sum'])
-      {
-        unlink($output_filepath);
-        uploadasync_delete_upload_token($params['original_sum']);
-        return new PwgError(500, 'provided original_sum '.$params['original_sum'].' does not match with merged file sum '.$merged_md5);
-      }
-
-      include_once(PHPWG_ROOT_PATH.'admin/include/functions_upload.inc.php');
-
-      $image_id = add_uploaded_file(
-        $output_filepath,
-        $params['filename'],
-        $params['category'],
-        $params['level'],
-        $params['image_id'],
-        $params['original_sum']
-      );
-
-      // file_put_contents('/tmp/uploadAsync.log', 'image_id after add_uploaded_file = '.$image_id."\n", FILE_APPEND);
-
-      // and now, let's create tag associations
-      if (isset($params['tag_ids']) and !empty($params['tag_ids']))
-      {
-        set_tags(
-          explode(',', $params['tag_ids']),
-          $image_id
-        );
-      }
-
-      // time to set other infos
-      $info_columns = array(
-        'name',
-        'author',
-        'comment',
-        'date_creation',
-      );
-
-      $update = array();
-      foreach ($info_columns as $key)
-      {
-        if (isset($params[$key]))
-        {
-          $update[$key] = $params[$key];
-        }
-      }
+    // all chunks are not yet available
+    return array('message' => 'chunks uploaded = '.implode(',', $chunk_ids_uploaded));
+  }
   
-      if (count(array_keys($update)) > 0)
-      {
-        single_update(
-          IMAGES_TABLE,
-          $update,
-          array('id' => $image_id)
-        );
-      }
-
-      // final step, reset user cache
-      invalidate_user_cache();
-
-      // trick to bypass get_sql_condition_FandF
-      if (!empty($params['level']) and $params['level'] > $user['level'])
-      {
-        // this will not persist
-        $user['level'] = $params['level'];
-      }
-
-      uploadasync_delete_upload_token($params['original_sum']);
-      return $service->invoke('pwg.images.getInfo', array('image_id' => $image_id));
-    }
-  }
-
-  return array('message' => 'chunks uploaded = '.implode(',', $chunk_ids_uploaded));
-}
-
-function uploadasync_delete_upload_token($file_md5)
-{
-  global $user, $prefixeTable;
-
-  $token_tablename = $prefixeTable.'upload_tokens';
-
-  $query = '
-DELETE
-  FROM `'.$token_tablename.'`
-  WHERE `file_md5` = \''.$file_md5.'\'
-    AND `user_id` = '.$user['id'].'
-;';
-  pwg_query($query);
-}
-
-function uploadasync_list_uploaded_chunks($nb_chunks, $chunkfile_path_pattern)
-{
-  $chunk_ids_uploaded = array();
-
-  for ($i = 1; $i <= $nb_chunks; $i++)
+  // all chunks available
+  file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] '.$params['original_sum'].' '.$params['chunks']." chunks available\n", FILE_APPEND);
+  $output_filepath = $output_filepath_prefix.'.merged';
+  
+  // chunks already being merged?
+  if ( file_exists($output_filepath) && ($fp = fopen($output_filepath, "rb"))!==false )
   {
-    if (file_exists(sprintf($chunkfile_path_pattern, $i, $nb_chunks)))
+    // merge file already exists
+    fclose($fp);
+    file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] '.$output_filepath." already exists\n", FILE_APPEND);
+    return array('message' => 'chunks uploaded = '.implode(',', $chunk_ids_uploaded));
+  }
+  
+  // create merged and open it for writing only
+  $fp = fopen($output_filepath, "wb");
+  if ( !$fp )
+  {
+    // unable to create file and open it for writing only
+    file_put_contents('/tmp/uploadAsync.log', '['.date('c').']'.$chunkfile_path." unable to create merged\n", FILE_APPEND);
+    return new PwgError(500, 'error while creating merged '.$chunkfile_path);
+  }
+  // acquire an exclusive lock and keep it until merge completes
+  // this postpones another uploadAsync task running in another thread
+  if (!flock($fp, LOCK_EX)) {
+    // unable to obtain lock
+    fclose($fp);
+    file_put_contents('/tmp/uploadAsync.log', '['.date('c').']'.$chunkfile_path." unable to obtain lock\n", FILE_APPEND);
+    return new PwgError(500, 'error while locking merged '.$chunkfile_path);
+  }
+
+  // loop over all chunks
+  foreach ($chunk_ids_uploaded as $chunk_id)
+  {
+    $chunkfile_path = sprintf($chunkfile_path_pattern, $chunk_id, $params['chunks']);
+
+    // chunk deleted by preceding merge?
+    if (!file_exists($chunkfile_path))
     {
-      $chunk_ids_uploaded[] = $i;
+      // cancel merge
+      file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] '.$chunkfile_path." already merged\n", FILE_APPEND);
+      flock($fp, LOCK_UN);
+      fclose($fp);
+      return array('message' => 'chunks uploaded = '.implode(',', $chunk_ids_uploaded));
+    }
+
+    if (!fwrite($fp, file_get_contents($chunkfile_path)))
+    {
+      // could not append chunk
+      file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] error merging chunk '.$chunkfile_path."\n", FILE_APPEND);
+      flock($fp, LOCK_UN);
+      fclose($fp);
+      // delete merge file without returning an error
+      @unlink($output_filepath);
+      return new PwgError(500, 'error while merging chunk '.$chunk_id);
+    }
+
+    // delete chunk and clear cache
+    unlink($chunkfile_path);
+  }
+
+  // flush output before releasing lock
+  fflush($fp);
+  flock($fp, LOCK_UN);
+  fclose($fp);
+  file_put_contents('/tmp/uploadAsync.log', '['.date('c')."] ".$output_filepath." saved\n", FILE_APPEND);
+  
+  // MD5 checksum
+  $merged_md5 = md5_file($output_filepath);
+
+  if ($merged_md5 != $params['original_sum'])
+  {
+    unlink($output_filepath);
+    file_put_contents('/tmp/uploadAsync.log', '['.date('c').'] '.$output_filepath." MD5 checksum mismatched!\n", FILE_APPEND);
+    return new PwgError(500, "MD5 checksum merged file mismatched");
+  }
+  file_put_contents('/tmp/uploadAsync.log', '['.date('c')."] ".$output_filepath." MD5 checksum Ok\n", FILE_APPEND);
+
+  include_once(PHPWG_ROOT_PATH.'admin/include/functions_upload.inc.php');
+
+  $image_id = add_uploaded_file(
+    $output_filepath,
+    $params['filename'],
+    $params['category'],
+    $params['level'],
+    $params['image_id'],
+    $params['original_sum']
+  );
+
+  // file_put_contents('/tmp/uploadAsync.log', 'image_id after add_uploaded_file = '.$image_id."\n", FILE_APPEND);
+
+  // and now, let's create tag associations
+  if (isset($params['tag_ids']) and !empty($params['tag_ids']))
+  {
+    set_tags(
+      explode(',', $params['tag_ids']),
+      $image_id
+    );
+  }
+
+  // time to set other infos
+  $info_columns = array(
+    'name',
+    'author',
+    'comment',
+    'date_creation',
+  );
+
+  $update = array();
+  foreach ($info_columns as $key)
+  {
+    if (isset($params[$key]))
+    {
+      $update[$key] = $params[$key];
     }
   }
 
-  return $chunk_ids_uploaded;
+  if (count(array_keys($update)) > 0)
+  {
+    single_update(
+      IMAGES_TABLE,
+      $update,
+      array('id' => $image_id)
+    );
+  }
+
+  // final step, reset user cache
+  invalidate_user_cache();
+
+  // trick to bypass get_sql_condition_FandF
+  if (!empty($params['level']) and $params['level'] > $user['level'])
+  {
+    // this will not persist
+    $user['level'] = $params['level'];
+  }
+
+  // delete chunks older than a week
+  $now = time();
+  foreach (glob($conf['upload_dir'].'/buffer/'."*.chunk") as $file) {
+    if (is_file($file)) {
+      if ($now - filemtime($file) >= 60 * 60 * 24 * 7) { // 7 days
+        file_put_contents('/tmp/uploadAsync.log', 'delete '.$file."\n", FILE_APPEND);
+        unlink($file);
+      } else {
+        file_put_contents('/tmp/uploadAsync.log', 'keep '.$file."\n", FILE_APPEND);
+      }
+    }
+  }
+
+  // delete merged older than a week
+  foreach (glob($conf['upload_dir'].'/buffer/'."*.merged") as $file) {
+    if (is_file($file)) {
+      if ($now - filemtime($file) >= 60 * 60 * 24 * 7) { // 7 days
+        file_put_contents('/tmp/uploadAsync.log', 'delete '.$file."\n", FILE_APPEND);
+        unlink($file);
+      } else {
+        file_put_contents('/tmp/uploadAsync.log', 'keep '.$file."\n", FILE_APPEND);
+      }
+    }
+  }
+
+  return $service->invoke('pwg.images.getInfo', array('image_id' => $image_id));
+}
+
+function file_exists_safe($file) {
+    // tries to create and open for writing only
+    if (!$fd = fopen($file, 'xb')) {
+        return true;  // the file already exists
+    }
+    fclose($fd);  // the file is now created, we don't need the file handler
+    return false;
 }
